@@ -129,17 +129,18 @@ export default function App() {
     const affectedContas = new Set();
 
     // Contas excluídas da soma 1.1.1 para o erro 894
+    // Contas em formato numérico (sem pontos): 1.1.1.x.x.xx.xx → 111xxxxxx
     const EXCLUIDAS = new Set([
-      "1.1.1.1.1.01.00",
-      "1.1.1.1.1.02.00",
-      "1.1.1.2.1.01.00",
-      "1.1.1.1.2.00.00",
+      "111110100", // 1.1.1.1.1.01.00
+      "111110200", // 1.1.1.1.1.02.00
+      "111210100", // 1.1.1.2.1.01.00
+      "111120000", // 1.1.1.1.2.00.00
     ]);
     function isContaExcluida(conta) {
-      return EXCLUIDAS.has(conta) || conta.startsWith("1.1.1.3");
+      return EXCLUIDAS.has(conta) || conta.startsWith("1113");
     }
     function isContaBase(conta) {
-      return conta.startsWith("1.1.1") && !isContaExcluida(conta);
+      return conta.startsWith("111") && !isContaExcluida(conta);
     }
 
     // Para cada erro 894 (ctb+fonte), calcular:
@@ -311,8 +312,8 @@ export default function App() {
 
         {/* STEP 3 */}
         {step === 3 && (() => {
-          const EXCL = new Set(["1.1.1.1.1.01.00","1.1.1.1.1.02.00","1.1.1.2.1.01.00","1.1.1.1.2.00.00"]);
-          const isBase = (c) => c.startsWith("1.1.1") && !EXCL.has(c) && !c.startsWith("1.1.1.3");
+          const EXCL = new Set(["111110100","111110200","111210100","111120000"]);
+          const isBase = (c) => c.startsWith("111") && !EXCL.has(c) && !c.startsWith("1113");
           const somasCSV = {};
           if (csvRows) {
             for (const r of csvRows) {
