@@ -128,18 +128,63 @@ export default function App() {
     let type17Fixed = 0;
     const affectedContas = new Set();
 
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      if (r[0] !== "17") continue;
-      const key = `${r[4]}:${r[5]}`;
-      if (!(key in corrections)) continue;
-      const { val, nat } = toNatural(corrections[key]);
-      rows[i][11] = val;
-      rows[i][12] = nat;
-      type17Fixed++;
-      affectedContas.add(r[1]);
+    // Contas excluídas da soma 1.1.1 para o erro 894
+    const EXCLUIDAS = new Set([
+      "1.1.1.1.1.01.00",
+      "1.1.1.1.1.02.00",
+      "1.1.1.2.1.01.00",
+      "1.1.1.1.2.00.00",
+    ]);
+    function isContaExcluida(conta) {
+      return EXCLUIDAS.has(conta) || conta.startsWith("1.1.1.3");
+    }
+    function isContaBase(conta) {
+      return conta.startsWith("1.1.1") && !isContaExcluida(conta);
     }
 
+    // Para cada erro 894 (ctb+fonte), calcular:
+    //   soma_balancete = soma dos saldo_final das contas 1.1.1 elegíveis no CSV (tipo 17, mesmo ctb+fonte)
+    //   diferença = AM - soma_balancete
+    //   lançar a diferença na PRIMEIRA linha tipo 17 com esse ctb+fonte (qualquer conta)
+    //   via: novo_saldo_final = saldo_final_atual + diferença
+
+    const keysToFix = new Set(Object.keys(corrections));
+
+    for (const key of keysToFix) {
+      const [ctb, fonte] = key.split(":");
+      const amValue = corrections[key]; // valor AM (signed)
+
+      // 1. Somar saldos finais das contas 1.1.1 elegíveis para esse ctb+fonte
+      let somaBalancete = 0;
+      for (const r of rows) {
+        if (r[0] !== "17") continue;
+        if (r[4] !== ctb || r[5] !== fonte) continue;
+        if (!isContaBase(r[1])) continue;
+        somaBalancete += signedValue(r[11], r[12]);
+      }
+
+      // 2. Diferença a lançar
+      const diff = amValue - somaBalancete;
+      if (Math.abs(diff) < 0.005) continue; // sem ajuste necessário
+
+      // 3. Primeira linha tipo 17 com esse ctb+fonte (qualquer conta)
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (r[0] !== "17") continue;
+        if (r[4] !== ctb || r[5] !== fonte) continue;
+
+        const saldoAtual = signedValue(r[11], r[12]);
+        const novoSaldo = saldoAtual + diff;
+        const { val, nat } = toNatural(novoSaldo);
+        rows[i][11] = val;
+        rows[i][12] = nat;
+        type17Fixed++;
+        affectedContas.add(r[1]);
+        break; // apenas a primeira ocorrência
+      }
+    }
+
+    // Recalcular tipo 10 para contas afetadas
     const contaSums = {};
     for (const r of rows) {
       if (r[0] !== "17") continue;
@@ -227,75 +272,93 @@ export default function App() {
         )}
 
         {/* STEP 3 */}
-        {step === 3 && (
-          <Card title={`3 · Revisar — ${parsedErrors.length} erros 894 encontrados`}>
-            <p style={{ color: "#8b949e", fontSize: 13, marginBottom: 4 }}>
-              Valor do <strong style={{ color: "#7ee787" }}>Acompanhamento Mensal</strong> assumido como correto. Edite se necessário.
-            </p>
-            <p style={{ color: "#484f58", fontSize: 12, marginBottom: 16 }}>📄 {pdfFileName}</p>
+        {step === 3 && (() => {
+          const EXCL = new Set(["1.1.1.1.1.01.00","1.1.1.1.1.02.00","1.1.1.2.1.01.00","1.1.1.1.2.00.00"]);
+          const isBase = (c) => c.startsWith("1.1.1") && !EXCL.has(c) && !c.startsWith("1.1.1.3");
+          const somasCSV = {};
+          if (csvRows) {
+            for (const r of csvRows) {
+              if (r[0] !== "17") continue;
+              if (!isBase(r[1])) continue;
+              const k = `${r[4]}:${r[5]}`;
+              somasCSV[k] = (somasCSV[k] || 0) + signedValue(r[11], r[12]);
+            }
+          }
+          return (
+            <Card title={`3 · Revisar — ${parsedErrors.length} erros 894 encontrados`}>
+              <p style={{ color: "#8b949e", fontSize: 13, marginBottom: 4 }}>
+                A diferença entre <strong style={{ color: "#7ee787" }}>Acomp. Mensal</strong> e a soma das contas 1.1.1 no CSV será lançada na 1ª linha tipo&nbsp;17 do CTB+Fonte.
+              </p>
+              <p style={{ color: "#484f58", fontSize: 12, marginBottom: 16 }}>📄 {pdfFileName}</p>
+              <div style={{ overflowX: "auto", maxHeight: 400, overflowY: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      {["CTB", "Fonte", "Soma 1.1.1 (CSV)", "AM (correto)", "Diferença"].map((h) => (
+                        <th key={h} style={{ textAlign: "left", padding: "6px 10px", fontSize: 10, color: "#484f58", textTransform: "uppercase", letterSpacing: 1, borderBottom: "2px solid #21262d", fontWeight: 600 }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {parsedErrors.map((err) => {
+                      const key = `${err.ctb}:${err.fonte}`;
+                      const current = corrections[key] ?? 0;
+                      const { val: displayVal, nat: displayNat } = toNatural(current);
+                      const somaCSV = somasCSV[key] || 0;
+                      const diff = current - somaCSV;
+                      const { val: diffVal, nat: diffNat } = toNatural(diff);
+                      const hasDiff = Math.abs(diff) > 0.005;
+                      return (
+                        <tr key={key} style={{ background: hasDiff ? "#0d2439" : "#161b22", borderBottom: "1px solid #1c2128" }}>
+                          <td style={{ padding: "5px 10px", color: "#e6edf3" }}>{err.ctb}</td>
+                          <td style={{ padding: "5px 10px", color: "#e6edf3" }}>{err.fonte}</td>
+                          <td style={{ padding: "5px 10px", color: "#f85149", fontFamily: "'Courier New', monospace" }}>
+                            {formatBRFloat(Math.abs(somaCSV))} {somaCSV < 0 ? "C" : "D"}
+                          </td>
+                          <td style={{ padding: "4px 8px" }}>
+                            <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                              <input
+                                type="text"
+                                value={displayVal}
+                                onChange={(e) => {
+                                  const v = parseBRFloat(e.target.value);
+                                  setCorrections((prev) => ({ ...prev, [key]: displayNat === "C" ? -v : v }));
+                                }}
+                                style={{ width: 100, background: "#0d1117", border: "1px solid #30363d", borderRadius: 4, padding: "3px 7px", color: "#7ee787", fontFamily: "'Courier New', monospace", fontSize: 12 }}
+                              />
+                              <select
+                                value={displayNat}
+                                onChange={(e) => {
+                                  const nat = e.target.value;
+                                  setCorrections((prev) => {
+                                    const abs = Math.abs(prev[key] || 0);
+                                    return { ...prev, [key]: nat === "C" ? -abs : abs };
+                                  });
+                                }}
+                                style={{ background: "#21262d", border: "1px solid #30363d", color: "#e6edf3", borderRadius: 4, padding: "3px 5px", fontSize: 12 }}
+                              >
+                                <option value="D">D</option>
+                                <option value="C">C</option>
+                              </select>
+                            </div>
+                          </td>
+                          <td style={{ padding: "5px 10px", color: hasDiff ? "#f0883e" : "#484f58", fontFamily: "'Courier New', monospace" }}>
+                            {hasDiff ? `${diffNat === "C" ? "−" : "+"}${diffVal} ${diffNat}` : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+                <Btn onClick={() => setStep(2)} secondary>← Voltar</Btn>
+                <Btn onClick={applyCorrections}>Gerar CSV corrigido →</Btn>
+              </div>
+            </Card>
+          );
+        })()}
 
-            <div style={{ overflowX: "auto", maxHeight: 400, overflowY: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead>
-                  <tr>
-                    {["CTB", "Fonte", "Balancete (CSV)", "Acomp. Mensal", "Valor a aplicar"].map((h) => (
-                      <th key={h} style={{ textAlign: "left", padding: "6px 10px", fontSize: 10, color: "#484f58", textTransform: "uppercase", letterSpacing: 1, borderBottom: "2px solid #21262d", fontWeight: 600 }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {parsedErrors.map((err) => {
-                    const key = `${err.ctb}:${err.fonte}`;
-                    const current = corrections[key] ?? 0;
-                    const { val: displayVal, nat: displayNat } = toNatural(current);
-                    const diff = Math.abs(parseDotFloat(err.balancete) - parseDotFloat(err.acompanhamento)) > 0.005;
-                    const bg = diff ? "#0d2439" : "#161b22";
-                    return (
-                      <tr key={key} style={{ background: bg, borderBottom: "1px solid #1c2128" }}>
-                        <td style={{ padding: "5px 10px", color: "#e6edf3" }}>{err.ctb}</td>
-                        <td style={{ padding: "5px 10px", color: "#e6edf3" }}>{err.fonte}</td>
-                        <td style={{ padding: "5px 10px", color: "#f85149" }}>{err.balancete}</td>
-                        <td style={{ padding: "5px 10px", color: "#7ee787" }}>{err.acompanhamento}</td>
-                        <td style={{ padding: "4px 8px" }}>
-                          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                            <input
-                              type="text"
-                              value={displayVal}
-                              onChange={(e) => {
-                                const v = parseBRFloat(e.target.value);
-                                setCorrections((prev) => ({ ...prev, [key]: displayNat === "C" ? -v : v }));
-                              }}
-                              style={{ width: 100, background: "#0d1117", border: "1px solid #30363d", borderRadius: 4, padding: "3px 7px", color: "#f0f6fc", fontFamily: "'Courier New', monospace", fontSize: 12 }}
-                            />
-                            <select
-                              value={displayNat}
-                              onChange={(e) => {
-                                const nat = e.target.value;
-                                setCorrections((prev) => {
-                                  const abs = Math.abs(prev[key] || 0);
-                                  return { ...prev, [key]: nat === "C" ? -abs : abs };
-                                });
-                              }}
-                              style={{ background: "#21262d", border: "1px solid #30363d", color: "#e6edf3", borderRadius: 4, padding: "3px 5px", fontSize: 12 }}
-                            >
-                              <option value="D">D</option>
-                              <option value="C">C</option>
-                            </select>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-              <Btn onClick={() => setStep(2)} secondary>← Voltar</Btn>
-              <Btn onClick={applyCorrections}>Gerar CSV corrigido →</Btn>
-            </div>
-          </Card>
-        )}
 
         {/* STEP 4 */}
         {step === 4 && stats && (
