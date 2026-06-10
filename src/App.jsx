@@ -168,6 +168,11 @@ export default function App() {
       if (Math.abs(diff) < 0.005) continue; // sem ajuste necessário
 
       // 3. Primeira linha tipo 17 com esse ctb+fonte (qualquer conta)
+      // Campos tipo 17: [7]=saldo_ini [8]=nat_ini [9]=debito [10]=credito [11]=saldo_final [12]=nat_final
+      // saldo_final = saldo_inicial(signed) + debito - credito
+      // Para ajustar o saldo_final sem alterar o saldo_inicial:
+      //   diff > 0 → aumentar débito em |diff|
+      //   diff < 0 → aumentar crédito em |diff|
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         if (r[0] !== "17") continue;
@@ -175,9 +180,23 @@ export default function App() {
 
         const saldoAtual = signedValue(r[11], r[12]);
         const novoSaldo = saldoAtual + diff;
-        const { val, nat } = toNatural(novoSaldo);
-        rows[i][11] = val;
-        rows[i][12] = nat;
+
+        // Atualizar saldo_final
+        const { val: sfVal, nat: sfNat } = toNatural(novoSaldo);
+        rows[i][11] = sfVal;
+        rows[i][12] = sfNat;
+
+        // Ajustar débito ou crédito conforme o sinal da diferença
+        if (diff > 0) {
+          // saldo aumentou → soma diff no débito
+          const debitoAtual = parseBRFloat(r[9]);
+          rows[i][9] = formatBRFloat(debitoAtual + diff);
+        } else {
+          // saldo diminuiu → soma |diff| no crédito
+          const creditoAtual = parseBRFloat(r[10]);
+          rows[i][10] = formatBRFloat(creditoAtual + Math.abs(diff));
+        }
+
         type17Fixed++;
         affectedContas.add(r[1]);
         break; // apenas a primeira ocorrência
@@ -185,6 +204,9 @@ export default function App() {
     }
 
     // Recalcular tipo 10 para contas afetadas
+    // Tipo 10 campos: [3]=saldo_ini [4]=nat_ini [5]=debito [6]=credito [7]=saldo_final [8]=nat_final
+    // A soma dos tipo 17 nos dá o novo saldo_final esperado do tipo 10
+    // Ajustamos débito ou crédito do tipo 10 para refletir a diferença
     const contaSums = {};
     for (const r of rows) {
       if (r[0] !== "17") continue;
@@ -196,9 +218,25 @@ export default function App() {
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       if (r[0] !== "10" || !affectedContas.has(r[1])) continue;
-      const { val, nat } = toNatural(contaSums[r[1]] || 0);
-      rows[i][7] = val;
-      rows[i][8] = nat;
+
+      const saldoAtual10 = signedValue(r[7], r[8]);
+      const novoSaldo10 = contaSums[r[1]] || 0;
+      const diff10 = novoSaldo10 - saldoAtual10;
+
+      // Atualizar saldo_final
+      const { val: sfVal10, nat: sfNat10 } = toNatural(novoSaldo10);
+      rows[i][7] = sfVal10;
+      rows[i][8] = sfNat10;
+
+      // Ajustar débito ou crédito do tipo 10
+      if (Math.abs(diff10) >= 0.005) {
+        if (diff10 > 0) {
+          rows[i][5] = formatBRFloat(parseBRFloat(r[5]) + diff10);
+        } else {
+          rows[i][6] = formatBRFloat(parseBRFloat(r[6]) + Math.abs(diff10));
+        }
+      }
+
       type10Fixed++;
     }
 
